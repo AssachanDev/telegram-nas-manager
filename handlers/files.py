@@ -1,0 +1,199 @@
+import asyncio
+import logging
+import uuid
+from pathlib import Path
+from aiogram import Router, types, F, Bot
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from config import NAS_ROOT_PATH, CATEGORIES, is_authorized
+from utils.storage import format_bytes, sanitize_filename, get_unique_path, is_rate_limited, safe_resolve
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+# In-memory session for pending file operations (max 500 concurrent sessions)
+pending_files: dict = {}
+_MAX_PENDING = 500
+
+async def get_folder_selection_keyboard(session_id: str, current_path_str: str, recommended_cat: str = None):
+    """Build keyboard for browsing and selecting target folders (async I/O)."""
+    builder = InlineKeyboardBuilder()
+
+    nas_root = Path(NAS_ROOT_PATH)
+    current_path = safe_resolve(nas_root, current_path_str)
+    if current_path is None or not current_path.exists():
+        current_path = nas_root
+        current_path_str = ""
+
+    # Quick Recommendation (only at root)
+    if current_path_str == "" and recommended_cat:
+        builder.button(
+            text=f"⭐ Save to {recommended_cat} (Auto)",
+            callback_data=f"save_to:{session_id}:{recommended_cat}"
+        )
+
+    def list_dirs(path):
+        return sorted([f.name for f in path.iterdir() if f.is_dir() and not f.name.startswith('.')])
+
+    try:
+        subfolders = await asyncio.to_thread(list_dirs, current_path)
+        for folder in subfolders:
+            rel_path = f"{current_path_str}/{folder}".strip("/")
+            builder.button(text=f"📁 {folder}", callback_data=f"browse_save:{session_id}:{rel_path}")
+    except OSError as e:
+        logger.error(f"Error listing subfolders: {e}")
+
+    builder.adjust(2)
+
+    action_builder = InlineKeyboardBuilder()
+    action_builder.button(text="✅ Save Here", callback_data=f"save_to:{session_id}:{current_path_str}")
+
+    if current_path_str != "":
+        parent_path = "/".join(current_path_str.split("/")[:-1])
+        action_builder.button(text="⬅️ Up", callback_data=f"browse_save:{session_id}:{parent_path}")
+
+    action_builder.button(text="❌ Cancel", callback_data=f"cancel_up:{session_id}")
+    action_builder.adjust(2)
+
+    builder.attach(action_builder)
+    return builder.as_markup()
+
+@router.message(F.from_user.id.func(is_authorized), F.document | F.photo | F.video | F.audio)
+async def handle_file_upload(message: types.Message):
+    """Detect file upload and show folder browser for target selection."""
+    if message.document:
+        file_id = message.document.file_id
+        orig_name = message.document.file_name or f"file_{file_id[:8]}"
+        file_size = message.document.file_size
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+        orig_name = f"photo_{file_id[:8]}.jpg"
+        file_size = message.photo[-1].file_size
+    elif message.video:
+        file_id = message.video.file_id
+        orig_name = message.video.file_name or f"video_{file_id[:8]}.mp4"
+        file_size = message.video.file_size
+    elif message.audio:
+        file_id = message.audio.file_id
+        orig_name = message.audio.file_name or f"audio_{file_id[:8]}.mp3"
+        file_size = message.audio.file_size
+    else:
+        return
+
+    clean_name = sanitize_filename(orig_name)
+    ext = Path(clean_name).suffix.lower()
+
+    recommended_cat = "Other"
+    for cat, extensions in CATEGORIES.items():
+        if ext in extensions:
+            recommended_cat = cat
+            break
+
+    # Evict oldest session if at capacity
+    if len(pending_files) >= _MAX_PENDING:
+        oldest_key = next(iter(pending_files))
+        pending_files.pop(oldest_key, None)
+
+    session_id = uuid.uuid4().hex[:16]
+    pending_files[session_id] = {
+        "name": clean_name,
+        "size": file_size,
+        "file_id": file_id,
+        "recommended": recommended_cat
+    }
+
+    keyboard = await get_folder_selection_keyboard(session_id, "", recommended_cat)
+    await message.answer(
+        f"<b>File Received</b>\n"
+        f"<code>{clean_name}</code>  ·  {format_bytes(file_size)}\n\n"
+        f"Destination:  <code>/</code>\n"
+        f"Navigate to a folder or save here:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+@router.callback_query(F.data.startswith("browse_save:"))
+async def browse_folders_for_save(callback: types.CallbackQuery):
+    """Handle navigation within the folder browser for saving."""
+    _, session_id, rel_path = callback.data.split(":", 2)
+
+    if session_id not in pending_files:
+        await callback.answer("❌ Session expired.", show_alert=True)
+        return
+
+    nas_root = Path(NAS_ROOT_PATH)
+    if safe_resolve(nas_root, rel_path) is None:
+        await callback.answer("❌ Invalid path.", show_alert=True)
+        return
+
+    data = pending_files[session_id]
+    display_path = rel_path if rel_path else "/"
+
+    keyboard = await get_folder_selection_keyboard(session_id, rel_path)
+    await callback.message.edit_text(
+        f"<b>File Received</b>\n"
+        f"<code>{data['name']}</code>  ·  {format_bytes(data['size'])}\n\n"
+        f"Destination:  <code>/{display_path}</code>\n"
+        f"Navigate to a folder or save here:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("save_to:"))
+async def save_to_selected_path(callback: types.CallbackQuery, bot: Bot):
+    _, session_id, rel_path = callback.data.split(":", 2)
+
+    if session_id not in pending_files:
+        await callback.answer("❌ Session expired.", show_alert=True)
+        return
+
+    if is_rate_limited(callback.from_user.id):
+        await callback.answer("⏳ Too fast, wait a moment.", show_alert=True)
+        return
+
+    nas_root = Path(NAS_ROOT_PATH)
+    target_dir = safe_resolve(nas_root, rel_path)
+    if target_dir is None:
+        await callback.answer("❌ Invalid path.", show_alert=True)
+        return
+
+    data = pending_files.pop(session_id, None)
+    if data is None:
+        await callback.answer("❌ Session expired.", show_alert=True)
+        return
+
+    target_path = get_unique_path(target_dir / data['name'])
+
+    await callback.message.edit_text(
+        f"Saving <code>{data['name']}</code>...",
+        parse_mode="HTML"
+    )
+
+    try:
+        await asyncio.to_thread(lambda: target_dir.mkdir(parents=True, exist_ok=True))
+        file_info = await bot.get_file(data['file_id'])
+        await bot.download_file(file_info.file_path, destination=str(target_path))
+
+        display_rel = str(target_dir.relative_to(nas_root))
+        await callback.message.edit_text(
+            f"✅ <b>Saved</b>\n\n"
+            f"<code>{target_path.name}</code>\n"
+            f"→ <code>/{display_rel}/</code>",
+            parse_mode="HTML"
+        )
+        logger.info(f"User {callback.from_user.id} saved file to {target_path}")
+    except OSError as e:
+        logger.error(f"Error saving file: {e}", exc_info=True)
+        await callback.message.edit_text("❌ Failed to save file. Please try again.", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Unexpected error saving file: {e}", exc_info=True)
+        await callback.message.edit_text("❌ An unexpected error occurred.", parse_mode="HTML")
+
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("cancel_up:"))
+async def cancel_upload(callback: types.CallbackQuery):
+    session_id = callback.data.split(":", 1)[1]
+    pending_files.pop(session_id, None)
+    await callback.message.edit_text("Cancelled.", parse_mode="HTML")
+    await callback.answer()
