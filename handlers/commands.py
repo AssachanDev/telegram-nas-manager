@@ -69,6 +69,7 @@ async def cmd_folders_shortcut(message: types.Message):
         return
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Create New Folder", callback_data="fdir_mode:create")
+    builder.button(text="✏️ Rename Folder",     callback_data="fdir_mode:rename")
     builder.button(text="🗑️ Delete Folder",     callback_data="fdir_mode:delete")
     builder.button(text="❌ Cancel",             callback_data="fdir_cancel")
     builder.adjust(1)

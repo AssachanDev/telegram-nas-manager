@@ -18,7 +18,7 @@ A private NAS file management bot for Telegram — upload, browse, search, and o
 - **Browse** — Browse NAS contents by category with pagination, file sizes, and timestamps.
 - **Search** — Recursive filename search across the entire NAS with pagination.
 - **Rename** — Rename any file inline from the file options menu.
-- **Folder Manager** — Create or delete directories via an interactive inline menu.
+- **Folder Manager** — Create, rename, or delete directories via an interactive inline menu.
 - **Trash** — Deleted items move to `.trash/`. View, restore, or permanently delete from within the bot.
 - **Storage Monitor** — Disk usage with a visual progress bar and health indicator.
 - **Single-user auth** — One authorized Telegram ID. All others are blocked at every entry point.
@@ -97,7 +97,7 @@ The bot uses a persistent Reply Keyboard — no commands needed.
 |---|---|
 | Browse | Browse NAS by category with pagination |
 | Find | Search files by name across the entire NAS |
-| Folders | Create or delete directories |
+| Folders | Create, rename, or delete directories |
 | Trash | View, restore, or permanently delete trashed items |
 | Storage | Disk usage and health status |
 | _(send any file)_ | Upload flow — select destination folder |
