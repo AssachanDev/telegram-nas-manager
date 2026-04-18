@@ -10,7 +10,8 @@ router = Router()
 MAIN_MENU = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Browse"), KeyboardButton(text="🔎 Find")],
-        [KeyboardButton(text="📂 Folders"), KeyboardButton(text="📊 Storage")],
+        [KeyboardButton(text="📂 Folders"), KeyboardButton(text="🗑 Trash")],
+        [KeyboardButton(text="📊 Storage")],
     ],
     resize_keyboard=True,
 )
@@ -26,7 +27,8 @@ async def cmd_start(message: types.Message):
         "<b>Browse</b>  —  Navigate files by category\n"
         "<b>Find</b>  —  Search by filename across all folders\n"
         "<b>Folders</b>  —  Create or remove directories\n"
-        "<b>Storage</b>  —  View disk usage and health",
+        "<b>Trash</b>  —  View and manage deleted items\n"
+        "<b>Storage</b>  —  View disk usage",
         parse_mode="HTML",
         reply_markup=MAIN_MENU,
     )
@@ -41,7 +43,6 @@ async def cmd_space(message: types.Message):
         bar = generate_progress_bar(usage['percent'], length=PROGRESS_BAR_LENGTH)
         used_pct = usage['percent']
         status_icon = "🟢" if used_pct < 70 else "🟡" if used_pct < 90 else "🔴"
-
         text = (
             f"<b>Storage</b>  {status_icon}\n"
             f"<code>{bar}  {used_pct:.1f}%</code>\n\n"

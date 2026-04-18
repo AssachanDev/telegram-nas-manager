@@ -3,9 +3,11 @@ import logging
 import uuid
 from pathlib import Path
 from aiogram import Router, types, F, Bot
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import NAS_ROOT_PATH, CATEGORIES, is_authorized
-from utils.storage import format_bytes, sanitize_filename, get_unique_path, is_rate_limited, safe_resolve
+from utils.storage import format_bytes, sanitize_filename, get_unique_path, is_rate_limited, safe_resolve, validate_folder_name
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -13,6 +15,9 @@ router = Router()
 # In-memory session for pending file operations (max 500 concurrent sessions)
 pending_files: dict = {}
 _MAX_PENDING = 500
+
+class RenameState(StatesGroup):
+    waiting_for_name = State()
 
 async def get_folder_selection_keyboard(session_id: str, current_path_str: str, recommended_cat: str = None):
     """Build keyboard for browsing and selecting target folders (async I/O)."""
@@ -24,7 +29,6 @@ async def get_folder_selection_keyboard(session_id: str, current_path_str: str, 
         current_path = nas_root
         current_path_str = ""
 
-    # Quick Recommendation (only at root)
     if current_path_str == "" and recommended_cat:
         builder.button(
             text=f"⭐ Save to {recommended_cat} (Auto)",
@@ -88,7 +92,6 @@ async def handle_file_upload(message: types.Message):
             recommended_cat = cat
             break
 
-    # Evict oldest session if at capacity
     if len(pending_files) >= _MAX_PENDING:
         oldest_key = next(iter(pending_files))
         pending_files.pop(oldest_key, None)
@@ -113,7 +116,6 @@ async def handle_file_upload(message: types.Message):
 
 @router.callback_query(F.data.startswith("browse_save:"))
 async def browse_folders_for_save(callback: types.CallbackQuery):
-    """Handle navigation within the folder browser for saving."""
     _, session_id, rel_path = callback.data.split(":", 2)
 
     if session_id not in pending_files:
@@ -197,3 +199,54 @@ async def cancel_upload(callback: types.CallbackQuery):
     pending_files.pop(session_id, None)
     await callback.message.edit_text("Cancelled.", parse_mode="HTML")
     await callback.answer()
+
+# --- RENAME FLOW ---
+
+@router.callback_query(F.data.startswith("rename_ask:"))
+async def rename_ask(callback: types.CallbackQuery, state: FSMContext):
+    _, rel_dir, file_name = callback.data.split(":", 2)
+    await state.set_state(RenameState.waiting_for_name)
+    await state.update_data(rel_dir=rel_dir, file_name=file_name)
+    await callback.message.edit_text(
+        f"<b>Rename</b>\n\n"
+        f"Current:  <code>{file_name}</code>\n\n"
+        f"Type the new filename:",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(RenameState.waiting_for_name)
+async def rename_execute(message: types.Message, state: FSMContext):
+    new_name = message.text.strip() if message.text else ""
+    error = validate_folder_name(new_name)
+    if error:
+        await message.answer(f"❌ {error}", parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    nas_root = Path(NAS_ROOT_PATH)
+    base = safe_resolve(nas_root, data['rel_dir'])
+    if base is None:
+        await message.answer("❌ Invalid path.", parse_mode="HTML")
+        return
+
+    old_path = base / data['file_name']
+    if not old_path.exists():
+        await message.answer("❌ File no longer exists.", parse_mode="HTML")
+        return
+
+    new_path = get_unique_path(base / new_name)
+
+    try:
+        await asyncio.to_thread(lambda: old_path.rename(new_path))
+        await message.answer(
+            f"✅ <b>Renamed</b>\n\n"
+            f"<code>{data['file_name']}</code>\n→ <code>{new_path.name}</code>",
+            parse_mode="HTML"
+        )
+        logger.info(f"User {message.from_user.id} renamed {old_path} → {new_path}")
+    except OSError as e:
+        logger.error(f"Error renaming file: {e}")
+        await message.answer("❌ Failed to rename file.", parse_mode="HTML")

@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    container_name: telegram-nas-manager
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - NAS_PATH=/data
+    volumes:
+      - ${HOST_DATA_DIR:-/mnt/nas}:/data

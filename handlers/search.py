@@ -241,6 +241,7 @@ async def show_file_options(callback: types.CallbackQuery):
     top_cat = rel_dir.split("/")[0]
     builder = InlineKeyboardBuilder()
     builder.button(text="📥 Download", callback_data=f"download:{rel_dir}:{file_name}")
+    builder.button(text="✏️ Rename", callback_data=f"rename_ask:{rel_dir}:{file_name}")
     builder.button(text="🗑️ Delete", callback_data=f"del_conf:{rel_dir}:{file_name}")
     builder.button(text="⬅️ Back", callback_data=f"list:{top_cat}:0")
     builder.button(text="❌ Cancel", callback_data="search_cancel")
